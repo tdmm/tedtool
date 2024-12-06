@@ -16,17 +16,14 @@ import (
 // proxyCmd represents the proxy command
 var proxyCmd = &cobra.Command{
 	Use:   "proxy",
-	Short: "",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
-
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
+	Short: "Start a proxy server",
+	Long: `Start a proxy server that forwards requests to the specified Tendermint node
+and limits the number of requests per second.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// 获取用户传入的参数
 		url, _ := cmd.Flags().GetString("url")
 		port, _ := cmd.Flags().GetInt("port")
+		limit, _ := cmd.Flags().GetInt("limit")
 
 		// 校验参数
 		if url == "" {
@@ -34,27 +31,38 @@ to quickly create a Cobra application.`,
 		}
 
 		// 启动代理服务器
-		proxyHandlerFunc(url, port)
+		proxyHandlerFunc(url, port, limit)
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(proxyCmd)
 
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
+	// 定义命令行标志
 	proxyCmd.PersistentFlags().String("url", "", "proxy to tendermint url")
 	proxyCmd.PersistentFlags().Int("port", 26657, "listen port")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// proxyCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	proxyCmd.PersistentFlags().Int("limit", 10, "maximum requests per second")
 }
 
-func proxyHandlerFunc(targetURL string, port int) {
+func proxyHandlerFunc(targetURL string, port int, limit int) {
+	// 创建令牌桶
+	tokens := make(chan struct{}, limit)
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			// 每秒重新填充令牌桶
+			for i := 0; i < limit-len(tokens); i++ {
+				tokens <- struct{}{}
+			}
+		}
+	}()
+
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// 从令牌桶中获取令牌（如果没有令牌，会阻塞直到有令牌可用）
+		<-tokens
+
+		// 构建请求
 		req, err := http.NewRequest(r.Method, targetURL+r.URL.Path, r.Body)
 		if err != nil {
 			http.Error(w, "Failed to create request", http.StatusInternalServerError)
@@ -88,7 +96,7 @@ func proxyHandlerFunc(targetURL string, port int) {
 	})
 
 	serverAddr := fmt.Sprintf(":%d", port)
-	log.Printf("Proxy server listening on %s, forwarding to %s...", serverAddr, targetURL)
+	log.Printf("Proxy server listening on %s, forwarding to %s, limit: %d requests/sec...", serverAddr, targetURL, limit)
 	if err := http.ListenAndServe(serverAddr, nil); err != nil {
 		log.Fatalf("ListenAndServe failed: %v", err)
 	}
